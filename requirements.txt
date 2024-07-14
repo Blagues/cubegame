@@ -1,0 +1,4 @@
+moderngl
+numpy
+glfw
+freetype-py
