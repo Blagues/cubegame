@@ -2,3 +2,5 @@ moderngl
 numpy
 glfw
 freetype-py
+pyopengl
+numpy
