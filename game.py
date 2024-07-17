@@ -5,28 +5,7 @@ import numpy as np
 from PIL import Image
 import ctypes
 
-
-class Entity:
-    def __init__(self, name, texture, position, size, is_movable=False, max_velocity=np.array([0, 0]),
-                 drag=np.array([1, 1])):
-        self.name = name
-        self.texture = texture
-        self.position = np.array(position, dtype=np.float32)
-        self.size = size
-        self.is_movable = is_movable
-        self.velocity = np.array([0, 0], dtype=np.float32)
-        self.max_velocity = np.array(max_velocity, dtype=np.float32)
-        self.drag = np.array(drag, dtype=np.float32)
-
-    def update(self, dt):
-        if self.is_movable:
-            self.velocity *= self.drag
-            self.velocity = np.clip(self.velocity, -self.max_velocity, self.max_velocity)
-            self.position += self.velocity * dt
-
-    def add_velocity(self, force, dt):
-        if self.is_movable:
-            self.velocity += force * dt
+from movable_entity import MovableEntity
 
 
 class Game:
@@ -73,7 +52,7 @@ class Game:
 
         return texture, (width, height)
 
-    def add_entity(self, file_path, name, position, is_movable=False, max_velocity=(0, 0), drag=(1, 1), is_user=False):
+    def add_entity(self, file_path, name, position, max_velocity=np.array([15, 15]), drag=(0.9, 0.9), is_user=False):
         texture_info = self.load_texture(file_path)
         if texture_info is None:
             print(f"Failed to load texture for entity: {name}")
@@ -81,8 +60,12 @@ class Game:
 
         texture, (width, height) = texture_info
         size = (width / self.width, height / self.height)  # Normalize size to screen coordinates
-        size = (size[0] * 2, size[1] * 2)  # Scale the size to fit the screen
-        entity = Entity(name, texture, position, size, is_movable, max_velocity, drag)
+        size = (size[0] * 4, size[1] * 4)  # Scale the size up
+
+        id = len(self.entities)
+
+        entity = MovableEntity(name, texture, id, size, position, max_velocity, drag)
+
         self.entities.append(entity)
 
         if is_user:
@@ -93,7 +76,7 @@ class Game:
             glfw.set_window_should_close(self.window, True)
 
         if self.user_entity:
-            move_force = 20
+            move_force = 5
             if glfw.get_key(self.window, glfw.KEY_LEFT) == glfw.PRESS:
                 self.user_entity.add_velocity(np.array([-move_force, 0]), dt)
             if glfw.get_key(self.window, glfw.KEY_RIGHT) == glfw.PRESS:
@@ -213,9 +196,10 @@ if __name__ == "__main__":
     game.init_glfw()
 
     # Add entities
-    game.add_entity("assets/fongk.png", "User", (0.0, 0.0),
-                    is_movable=True, max_velocity=(15, 15),
-                    drag=(0.85, 0.85), is_user=True)
+    game.add_entity("assets/fongk.png",
+                    "User",
+                    (0.0, 0.0),
+                    is_user=True)
     game.add_entity("assets/RedCube.png", "Static1", (0.5, 0.5))
     game.add_entity("assets/YellowCube.png", "Static2", (-0.5, -0.5))
 

@@ -4,9 +4,9 @@ from entity import Entity
 
 
 class MovableEntity(Entity):
-    def __init__(self, name, id, size, position, max_velocity, drag):
+    def __init__(self, name, texture, id, size, position, max_velocity, drag):
 
-        super().__init__(name, id, size, position)
+        super().__init__(name, texture, id, size, position)
 
         self.max_velocity = max_velocity
         self.drag = drag
@@ -18,16 +18,19 @@ class MovableEntity(Entity):
 
     def update(self, dt):
         self.velocity = np.clip(self.velocity, -self.max_velocity, self.max_velocity)
+
         new_position = self.position + self.velocity * dt
         self.velocity *= self.drag
 
-        # bounce
-        for i in range(2):
-            if new_position[i] < -1 + self.size or new_position[i] > 1 - self.size:
-                self.velocity[i] *= -0.8
-                new_position[i] = np.clip(new_position[i], -1 + self.size, 1 - self.size)
-
-        # Clip the new position to the screen boundaries
-        new_position = np.clip(new_position, -1 + self.size, 1 - self.size)
+        for axis in range(2):
+            if self.hit_wall(axis):
+                self.velocity[axis] *= 0
+                new_position[axis] = np.clip(new_position[axis], -1 + self.size[axis]/2, 1 - self.size[axis]/2)
 
         self.position = new_position
+
+    def hit_wall(self, axis):
+        if self.position[axis] < -1 + self.size[axis]/2 or self.position[axis] > 1 - self.size[axis]/2:
+            return True
+        else:
+            return False
