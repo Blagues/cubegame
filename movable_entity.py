@@ -27,5 +27,7 @@ class MovableEntity(Entity):
                 self.velocity[i] *= -0.8
                 new_position[i] = np.clip(new_position[i], -1 + self.size, 1 - self.size)
 
-        self.position = new_position
+        # Clip the new position to the screen boundaries
+        new_position = np.clip(new_position, -1 + self.size, 1 - self.size)
 
+        self.position = new_position

@@ -8,5 +8,12 @@ class Entity:
         self.size = size
         self.position = position
 
+    def clip_to_screen(self):
+        # Clip the position to keep the entity within the screen boundaries
+        self.position = np.clip(self.position, -1 + self.size, 1 - self.size)
+
+    def update(self, dt):
+        pass
+
     def __str__(self):
         return f"{self.name} ({self.id})"
