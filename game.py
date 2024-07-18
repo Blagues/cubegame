@@ -1,20 +1,30 @@
+import time
 import glfw
 from OpenGL.GL import *
 from OpenGL.GL import shaders
 import numpy as np
 from PIL import Image
 import ctypes
+import uuid
+from threading import Lock
 
 from movable_entity import MovableEntity
+from network_manager import NetworkManager
 
 
 class Game:
-    def __init__(self, width, height):
+    def __init__(self, width, height, host='127.0.0.1', port=5000):
         self.width = width
         self.height = height
-        self.entities = []
+        self.entities = {}
         self.user_entity = None
         self.last_time = 0
+        self.texture_cache = {}
+        self.texture_cache_lock = Lock()
+        self.texture_loading_queue = []
+
+        self.network = NetworkManager(host, port, self)
+        self.network.start()
 
     def init_glfw(self):
         if not glfw.init():
@@ -29,53 +39,92 @@ class Game:
         glfw.make_context_current(self.window)
 
     def load_texture(self, file_path):
+        with self.texture_cache_lock:
+            if file_path in self.texture_cache:
+                return self.texture_cache[file_path]
+
         try:
             image = Image.open(file_path).convert("RGBA")
         except IOError:
             print(f"Error: Unable to open the image file: {file_path}")
             return None
 
+        print(f"Loaded image: {file_path}")
+
         image_data = image.tobytes()
         width, height = image.size
+
+        print(f"Image size: {width}x{height}")
 
         texture = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, texture)
 
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data)
+        self.check_gl_error("glTexImage2D")
 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        self.check_gl_error("glTexParameteri MIN_FILTER")
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        self.check_gl_error("glTexParameteri MAG_FILTER")
 
-        if glGetError() != GL_NO_ERROR:
-            print(f"OpenGL error occurred while loading texture: {file_path}")
-            return None
+        with self.texture_cache_lock:
+            self.texture_cache[file_path] = (texture, (width, height))
 
         return texture, (width, height)
 
-    def add_entity(self, file_path, name, position, max_velocity=np.array([15, 15]), drag=(0.9, 0.9), is_user=False):
-        texture_info = self.load_texture(file_path)
-        if texture_info is None:
-            print(f"Failed to load texture for entity: {name}")
-            return
+    def check_gl_error(self, operation):
+        error = glGetError()
+        if error != GL_NO_ERROR:
+            print(f"OpenGL error after {operation}: {error}")
 
-        texture, (width, height) = texture_info
-        size = (width / self.width, height / self.height)  # Normalize size to screen coordinates
-        size = (size[0] * 4, size[1] * 4)  # Scale the size up
+    def add_entity(self, file_path, name, position, max_velocity=np.array([15, 15]), drag=(0.9, 0.9), is_user=False,
+                   network_id=None):
+        print(f"Adding entity: {name}")
 
-        id = len(self.entities)
+        if not isinstance(position, np.ndarray):
+            position = np.array(position, dtype=np.float32)
+        if not isinstance(max_velocity, np.ndarray):
+            max_velocity = np.array(max_velocity, dtype=np.float32)
+        if not isinstance(drag, np.ndarray):
+            drag = np.array(drag, dtype=np.float32)
 
-        entity = MovableEntity(name, texture, id, size, position, max_velocity, drag)
+        id = network_id if network_id else (uuid.uuid1().int % 1000000 + int(time.time()))
 
-        self.entities.append(entity)
+        # Use a default size when creating the entity
+        default_size = np.array([0.1, 0.1], dtype=np.float32)
+        entity = MovableEntity(name, None, id, default_size, position, max_velocity, drag)
 
         if is_user:
             self.user_entity = entity
+        else:
+            self.entities[id] = entity
 
-    def process_input(self, dt):
+        self.schedule_texture_loading(entity, file_path)
+
+        print(f"Added entity: {entity}")
+
+    def schedule_texture_loading(self, entity, file_path):
+        def load_texture_for_entity():
+            texture_info = self.load_texture(file_path)
+            if texture_info is None:
+                print(f"Failed to load texture for entity: {entity.name}")
+                return
+
+            texture, (width, height) = texture_info
+            size = np.array([width / self.width * 4, height / self.height * 4],
+                            dtype=np.float32)  # Normalize and scale up
+
+            entity.texture = texture
+            entity.size = size
+
+        self.texture_loading_queue.append(load_texture_for_entity)
+
+    def process_input(self, dt, update_time):
         if glfw.get_key(self.window, glfw.KEY_ESCAPE) == glfw.PRESS:
             glfw.set_window_should_close(self.window, True)
 
         if self.user_entity:
+
             move_force = 5
             if glfw.get_key(self.window, glfw.KEY_LEFT) == glfw.PRESS:
                 self.user_entity.add_velocity(np.array([-move_force, 0]), dt)
@@ -86,28 +135,32 @@ class Game:
             if glfw.get_key(self.window, glfw.KEY_DOWN) == glfw.PRESS:
                 self.user_entity.add_velocity(np.array([0, -move_force]), dt)
 
-    def check_collision(self, entity1, entity2):
-        return (abs(entity1.position[0] - entity2.position[0]) < (entity1.size[0] + entity2.size[0]) / 2 and
-                abs(entity1.position[1] - entity2.position[1]) < (entity1.size[1] + entity2.size[1]) / 2)
+            # only update if velocity is greater than 0, and we haven't updated in the last 0.01 seconds
+            if np.linalg.norm(self.user_entity.velocity) > 0 and update_time > 0.01:
+                self.network.send_data({
+                    "type": "update",
+                    "network_id": self.user_entity.id,
+                    "position": [float(x) for x in self.user_entity.position]
+                })
 
-    def handle_collision(self, entity1, entity2):
-        overlap_x = (entity1.size[0] + entity2.size[0]) / 2 - abs(entity1.position[0] - entity2.position[0])
-        overlap_y = (entity1.size[1] + entity2.size[1]) / 2 - abs(entity1.position[1] - entity2.position[1])
+                return True
 
-        if overlap_x < overlap_y:
-            if entity1.position[0] < entity2.position[0]:
-                entity1.position[0] -= overlap_x / 2
-                entity2.position[0] += overlap_x / 2
+        return False
+
+    def handle_network_data(self, data):
+        print(f"Received data: {data}")
+        if data["type"] == "update":
+            net_id = data["network_id"]
+
+            if net_id in self.entities.keys():
+                print(f"Updating entity with network id: {net_id}")
+                self.entities[net_id].position = np.array(data["position"], dtype=np.float32)
             else:
-                entity1.position[0] += overlap_x / 2
-                entity2.position[0] -= overlap_x / 2
-        else:
-            if entity1.position[1] < entity2.position[1]:
-                entity1.position[1] -= overlap_y / 2
-                entity2.position[1] += overlap_y / 2
-            else:
-                entity1.position[1] += overlap_y / 2
-                entity2.position[1] -= overlap_y / 2
+                print(f"Creating new entity with network id: {net_id}")
+                self.add_entity("assets/BlueCube.png",
+                                f"OtherUser_{data['network_id']}",
+                                data["position"],
+                                network_id=data["network_id"])
 
     def run(self):
         vertex_shader = """
@@ -156,51 +209,51 @@ class Game:
         glVertexAttribPointer(texcoord, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(8))
 
         self.last_time = glfw.get_time()
+        update_time = 0
 
         while not glfw.window_should_close(self.window):
             current_time = glfw.get_time()
             dt = current_time - self.last_time
             self.last_time = current_time
 
-            self.process_input(dt)
+            if self.process_input(dt, update_time):
+                update_time = 0
+            else:
+                update_time += dt
 
-            for entity in self.entities:
-                entity.update(dt)
+            self.user_entity.update(dt)
 
-            for i in range(len(self.entities)):
-                for j in range(i + 1, len(self.entities)):
-                    if self.check_collision(self.entities[i], self.entities[j]):
-                        self.handle_collision(self.entities[i], self.entities[j])
+            for load_texture in self.texture_loading_queue:
+                load_texture()
+            self.texture_loading_queue.clear()
 
             glClear(GL_COLOR_BUFFER_BIT)
-
             glUseProgram(shader)
-
-            for entity in self.entities:
-                glBindTexture(GL_TEXTURE_2D, entity.texture)
-                translation_location = glGetUniformLocation(shader, "translation")
-                scale_location = glGetUniformLocation(shader, "scale")
-                glUniform2f(translation_location, *entity.position)
-                glUniform2f(scale_location, *entity.size)
-                glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+            self.draw_entities(shader, [entity for entity in self.entities.values() if entity.texture is not None] +
+                               ([
+                                    self.user_entity] if self.user_entity and self.user_entity.texture is not None else []))
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
 
+        self.network.close()
         glfw.terminate()
+
+    def draw_entities(self, shader, entities):
+        for entity in entities:
+            if entity.texture is None:
+                continue
+            glBindTexture(GL_TEXTURE_2D, entity.texture)
+            translation_location = glGetUniformLocation(shader, "translation")
+            scale_location = glGetUniformLocation(shader, "scale")
+            glUniform2f(translation_location, *entity.position)
+            glUniform2f(scale_location, *entity.size)
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+            self.check_gl_error("glDrawArrays")
 
 
 if __name__ == "__main__":
     game = Game(1200, 1000)
-
     game.init_glfw()
-
-    # Add entities
-    game.add_entity("assets/fongk.png",
-                    "User",
-                    (0.0, 0.0),
-                    is_user=True)
-    game.add_entity("assets/RedCube.png", "Static1", (0.5, 0.5))
-    game.add_entity("assets/YellowCube.png", "Static2", (-0.5, -0.5))
-
+    game.add_entity("assets/RedCube.png", "User", (0.5, 0.5), is_user=True)
     game.run()
