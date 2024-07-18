@@ -5,3 +5,5 @@ freetype-py
 pyopengl
 numpy
 Pillow
+sounddevice
+opuslib
